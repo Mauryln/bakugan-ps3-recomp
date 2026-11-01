@@ -5,7 +5,7 @@
 <h1>Bakugan: Battle Brawlers — native PS3 recompilation for Windows</h1>
 
 <p><strong>The PlayStation 3 release (<code>BLES00758</code>), statically recompiled into a native Windows x64 executable.</strong><br>
-No emulator. No Xbox 360 code. No Linux.</p>
+</p>
 
 <p>
 <img src="https://img.shields.io/badge/platform-Windows%20x64-0078D6?style=flat-square" alt="Platform: Windows x64">
@@ -19,12 +19,19 @@ No emulator. No Xbox 360 code. No Linux.</p>
 
 </div>
 
+> **2026-10-31 — FPS fix gameplay.** 3D rendering and playable Battle Arena gameplay,
+> with smoother gameplay at **about 20 FPS on average** (approximate user estimate,
+> not a benchmark): detailed views run at 16–18 FPS, while Bakugan launch/control
+> reaches 28–30 FPS. Menus recover to 30 FPS; cinematics run around 27–30 FPS.
+> The original **30 FPS cap is preserved**. Small loading hitches remain.
+> [Performance fixes and remaining work](docs/PERFORMANCE_2026-10-31.md).
+
 > **2026-10-31 — Battle Arena gameplay fixed.** Fixed turn-transition freezes,
 > speckled field rendering, and card textures. Player/CPU turns verified.
 > [Report and screenshots](docs/BATTLE_ARENA_FIXED.md).
 > Next: [effects and shaders](docs/NEXT_SESSION_EFFECTS_SHADERS.md).
 
-[Bakugan: Battle Brawlers](https://en.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) was never ported to PC. This project lifts the game's **PPU (CPU) and SPU (DSP) code to C++ ahead of time** with [ps3recomp](https://github.com/sp00nznet/ps3recomp) and links it against a small HLE runtime, producing an ordinary `.exe` that renders through Direct3D 12. Menus reach 30 FPS; battle performance remains work in progress.
+[Bakugan: Battle Brawlers](https://en.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) was never ported to PC. This project lifts the game's **PPU (CPU) and SPU (DSP) code to C++ ahead of time** with [ps3recomp](https://github.com/sp00nznet/ps3recomp) and links it against a small HLE runtime, producing an ordinary `.exe` that renders through Direct3D 12. Menus reach 30 FPS; 3D Battle Arena gameplay averages roughly 20 FPS in user testing, with further performance work pending.
 
 Nothing runs in an emulator: the machine code is translated once, then compiled like any other program.
 

@@ -1,5 +1,11 @@
 # Próxima sesión — efectos y shaders (cierre 31/10/2026)
 
+**Actualización posterior de rendimiento:** leer
+[PERFORMANCE_2026-10-31.md](PERFORMANCE_2026-10-31.md). Se conservan cuadros
+completos en flips, strips nativos y el límite de 30 FPS. El usuario confirmó
+28–30 FPS durante lanzamiento/control; quedan ~18 FPS en primer plano de selección.
+Algunos efectos y personajes mejoraron visualmente, sin validar todas las arenas.
+
 **Punto de partida:** Battle Arena jugable; campo y cartas corregidos y
 confirmados por el usuario. Se verificaron turno del jugador, lanzamiento,
 turno de la CPU y entrada al enfrentamiento. Rama `codex/battle-arena-rendering`.

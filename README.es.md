@@ -5,7 +5,7 @@
 <h1>Bakugan: Battle Brawlers — recompilación nativa de la versión PS3 para Windows</h1>
 
 <p><strong>La versión de PlayStation 3 (<code>BLES00758</code>), recompilada estáticamente a un ejecutable nativo de Windows x64.</strong><br>
-Sin emulador. Sin código de Xbox 360. Sin Linux.</p>
+</p>
 
 <p>
 <img src="https://img.shields.io/badge/plataforma-Windows%20x64-0078D6?style=flat-square" alt="Plataforma: Windows x64">
@@ -19,12 +19,19 @@ Sin emulador. Sin código de Xbox 360. Sin Linux.</p>
 
 </div>
 
+> **31/10/2026 — FPS fix gameplay.** Ya hay renderizado 3D y gameplay fluido
+> en Battle Arena, con **unos 20 FPS de media** (estimación aproximada del usuario,
+> no un benchmark): las vistas detalladas van a 16–18 FPS y el lanzamiento/control
+> del Bakugan alcanza 28–30 FPS. Los menús recuperan 30 FPS y las cinemáticas van
+> a 27–30 FPS. Se mantiene el **límite original de 30 FPS**. Quedan pequeños
+> tirones de carga. [Mejoras y trabajo pendiente](docs/PERFORMANCE_2026-10-31.md).
+
 > **31/10/2026 — Fixed gameplay Battle Arena.** Corregidos el bloqueo al cambiar
 > de turno, el granulado del campo y las texturas de cartas. Turnos 1P/CPU
 > verificados. [Informe y capturas](docs/BATTLE_ARENA_FIXED.md).
 > Próximo trabajo: [efectos y shaders](docs/NEXT_SESSION_EFFECTS_SHADERS.md).
 
-[Bakugan: Battle Brawlers](https://es.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) nunca salió en PC. Este proyecto levanta el código **PPU (CPU) y SPU (DSP)** del juego a C++ de forma estática con [ps3recomp](https://github.com/sp00nznet/ps3recomp) y lo enlaza contra un runtime HLE pequeño: el resultado es un `.exe` normal que dibuja por Direct3D 12. Los menús alcanzan 30 FPS; el rendimiento en combate sigue en desarrollo.
+[Bakugan: Battle Brawlers](https://es.wikipedia.org/wiki/Bakugan:_Battle_Brawlers) (2009) nunca salió en PC. Este proyecto levanta el código **PPU (CPU) y SPU (DSP)** del juego a C++ de forma estática con [ps3recomp](https://github.com/sp00nznet/ps3recomp) y lo enlaza contra un runtime HLE pequeño: el resultado es un `.exe` normal que dibuja por Direct3D 12. Los menús alcanzan 30 FPS; el gameplay 3D de Battle Arena ronda los 20 FPS de media en pruebas del usuario, con optimizaciones pendientes.
 
 Aquí no hay emulación: el código máquina se traduce una vez y después se compila como cualquier otro programa.
 

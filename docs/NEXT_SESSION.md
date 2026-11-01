@@ -1,3 +1,9 @@
+> **CIERRE FPS FIX GAMEPLAY:** build principal actualizada; última prueba: vistas detalladas 16–18 FPS, cinemáticas ~27 FPS, tirones de carga breves. Mantener límite 30 FPS y strips nativos. Ver el cierre y siguientes mediciones en [PERFORMANCE_2026-10-31.md](PERFORMANCE_2026-10-31.md).
+
+> **ACTUALIZACIÓN POSTERIOR 31/10/2026:** leer [PERFORMANCE_2026-10-31.md](PERFORMANCE_2026-10-31.md).
+> Cinemáticas/menú a 30 FPS y lanzamiento/control del Bakugan a 28–30 confirmados.
+> Conservar cuadros completos y strips nativos. Queda el primer plano de selección (~18 FPS).
+>
 > **ACTUALIZACIÓN 31/10/2026:** gameplay Battle Arena, campo y cartas corregidos.
 > Cierre y validación: [BATTLE_ARENA_FIXED.md](BATTLE_ARENA_FIXED.md).
 > Continuar con [NEXT_SESSION_EFFECTS_SHADERS.md](NEXT_SESSION_EFFECTS_SHADERS.md).

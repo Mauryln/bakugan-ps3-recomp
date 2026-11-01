@@ -2,10 +2,17 @@
 
 Última actualización (31/10/2026): **Fixed gameplay Battle Arena: turno del jugador y CPU, texturas del campo y cartas corregidos.** Confirmado visualmente por el usuario.
 
+**Rendimiento, actualización posterior del 31/10:** cinemáticas y regreso al menú
+a 30 FPS; lanzamiento/control del Bakugan a 28–30 FPS confirmados por el usuario.
+Se conserva el límite original de 30. Quedan ~18 FPS en el primer plano de
+selección/vistas detalladas y un pequeño tirón de carga. Strips nativos conservados, con mejora
+visual observada en personajes y algunos efectos. Detalles y límites:
+[PERFORMANCE_2026-10-31.md](PERFORMANCE_2026-10-31.md).
+
 Informe de cierre: [BATTLE_ARENA_FIXED.md](BATTLE_ARENA_FIXED.md). Próxima sesión:
 [NEXT_SESSION_EFFECTS_SHADERS.md](NEXT_SESSION_EFFECTS_SHADERS.md), dedicada a efectos y shaders.
-Build correcto, 15/15 pruebas y 27 parches reproducibles sobre un clone limpio.
-Sombras offscreen y rendimiento siguen pendientes. `0023` permanece revertido;
+Build correcto, 22/22 pruebas y 34 parches reproducibles sobre un clone limpio.
+Sombras offscreen y optimización del primer plano siguen pendientes. `0023` permanece revertido;
 `0024` y `0025` se conservan. Las conclusiones sobre 3D y gameplay que siguen son históricas.
 
 El cierre de la sesión del 24/10/2026 y el plan para retomarla están en
