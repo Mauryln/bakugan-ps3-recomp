@@ -11,11 +11,14 @@ out = ROOT / "diagnostics/arena/vertex-capacity"
 out.mkdir(parents=True, exist_ok=True)
 source = (ROOT / "ps3recomp-src/libs/video/rsx_d3d12_backend.c").read_text(encoding="utf-8")
 parts = []
-for name in ["static u32 vp_capacity_for(","static void vp_copy_vertex_frames("]:
+for name in ["static u32 vp_capacity_for(","static void vp_copy_vertex_frames(",
+             "static void vp_flush_vertex_frame("]:
     if name in source:
         start = source.index(name)
         end = source.index("\n}", start) + 2
         parts.append(source[start:end])
+if "static void vp_flush_vertex_frame(" not in source:
+    parts.append("static void vp_flush_vertex_frame(void*, const void*, u32, u32, u32) {}")
 extracted = "\n".join(parts)
 (out / "vertex_capacity.inc").write_text(extracted, encoding="utf-8")
 cc = next(Path("C:/Program Files (x86)/Microsoft Visual Studio").glob(

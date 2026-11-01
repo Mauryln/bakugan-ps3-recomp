@@ -1,0 +1,125 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -310,7 +310,8 @@
+     ID3D12PipelineState*  pipeline_state_vp;    /* decompiled VS + atlas PS      */
+     ID3D12PipelineState*  pipeline_state_vp_color; /* decompiled VS + colour PS (untextured 3D) */
+     ID3D12Resource*       vp_vb;                /* raw float4 attrib0, per-frame */
+-    void*                 vp_vb_mapped;
++    void*                 vp_vb_mapped; /* cached CPU vertex stream */
++    void*                 vp_vb_upload; /* mapped GPU upload, write-only */
+     u32                   vp_vb_offset;
+     u32                   vp_vertex_capacity;
+     ID3D12Resource*       vp_cb;                /* per-draw VP constant slots    */
+@@ -366,6 +367,13 @@
+ } D3D12State;
+
+ static D3D12State s_d3d;
++
++static void vp_flush_vertex_frame(void* upload, const void* cpu, u32 capacity, u32 parity, u32 bytes)
++{
++    if (!bytes) return;
++    u64 offset = (u64)parity * capacity * 256u;
++    memcpy((char*)upload + offset, (const char*)cpu + offset, bytes);
++}
+ /* Complete sampler tables stay immutable until the frame fence. A heap may
+  * contain at most 2048 samplers; additional pages cover even unique draws. */
+ #define SAMPLER_TABLES_PER_PAGE (2048 / RSX_MAX_TEXTURES)
+@@ -376,6 +384,7 @@
+     D3D12_SAMPLER_DESC tables[SAMPLER_TABLES_PER_PAGE][RSX_MAX_TEXTURES];
+ } s_sampler_pages[SAMPLER_MAX_PAGES];
+ static u32 s_sampler_inc;
++
+
+ static D3D12_TEXTURE_ADDRESS_MODE rsx_sampler_wrap(u32 wrap)
+ {
+@@ -1348,9 +1357,13 @@
+         if (SUCCEEDED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp,
+                 D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
+                 &IID_ID3D12Resource, (void**)&s_d3d.vp_vb)))
+-            s_d3d.vp_vb->lpVtbl->Map(s_d3d.vp_vb, 0, &nr, &s_d3d.vp_vb_mapped);
++            s_d3d.vp_vb->lpVtbl->Map(s_d3d.vp_vb, 0, &nr, &s_d3d.vp_vb_upload);
+         else
+             fprintf(stderr, "[VPVB] ALLOCATION FAILED -- no VP geometry will render%c", 10);
++
++        if (s_d3d.vp_vb_upload) s_d3d.vp_vb_mapped = malloc((size_t)bd.Width);
++        if (!s_d3d.vp_vb_mapped)
++            fprintf(stderr, "[VPVB] CPU staging allocation failed -- no VP geometry will render%c", 10);
+
+         bd.Width = (u64)VP_CB_STRIDE * MAX_DRAWS * 2;   /* per-draw constant slots, x2 parity */
+         /* A failure here is silent and catastrophic: vp_record_cb returns early,
+@@ -1733,14 +1746,14 @@
+      * draw index/count/CB stride/FP stride, vertices, VP constants, FP constants. */
+     snprintf(path, sizeof path, "%s/display_inputs.bin", dir);
+     FILE* inputs = fopen(path, "wb");
+-    if (inputs && s_d3d.vp_vb_mapped && s_d3d.vp_cb_mapped && s_d3d.vp_fpcb_mapped) {
++    if (inputs && s_d3d.vp_vb_upload && s_d3d.vp_cb_mapped && s_d3d.vp_fpcb_mapped) {
+         u32 parity = (u32)(s_d3d.vp_parity ^ 1);
+         for (u32 d = 0; d < ndraws && d < MAX_DRAWS; ++d) {
+             const D3D12DrawRecord* r = &s_d3d.draws[d];
+             if (!r->is_vp || r->is_clear || r->rt_off || !r->vertex_count || r->vertex_count > 128) continue;
+             u32 header[4] = {d, r->vertex_count, VP_CB_STRIDE, VP_FPCB_STRIDE};
+             fwrite(header, sizeof(header), 1, inputs);
+-            fwrite((char*)s_d3d.vp_vb_mapped + (u64)parity * s_d3d.vp_vertex_capacity * 256u + r->vb_byte_offset,
++            fwrite((char*)s_d3d.vp_vb_upload + (u64)parity * s_d3d.vp_vertex_capacity * 256u + r->vb_byte_offset,
+                    256u, r->vertex_count, inputs);
+             fwrite((char*)s_d3d.vp_cb_mapped + ((u64)parity * MAX_DRAWS + r->cb_slot) * VP_CB_STRIDE,
+                    1, VP_CB_STRIDE, inputs);
+@@ -4374,6 +4387,9 @@
+      * costs little. */
+     wait_for_gpu();
+     vp_release_frame_psos();
++    if (s_d3d.vp_vb_upload && s_d3d.vp_vb_mapped)
++        vp_flush_vertex_frame(s_d3d.vp_vb_upload, s_d3d.vp_vb_mapped,
++            s_d3d.vp_vertex_capacity, s_d3d.vp_parity, s_d3d.vp_vb_offset);
+     if (!rsx_prepare_samplers()) return;
+     /* Compile the real vertex program once its microcode is captured, and keep
+      * the constant bank uploaded for the VS. */
+@@ -5136,7 +5152,7 @@
+                     { static int tt = -1;
+                       if (tt < 0) { const char* e = getenv("VP_TESTTRI"); tt = e ? atoi(e) : 0; }
+                       if (tt && want >= 0 && s_d3d.vp_vb_mapped) {
+-                          float* vtx = (float*)((char*)s_d3d.vp_vb_mapped
++                          float* vtx = (float*)((char*)s_d3d.vp_vb_upload
+                               + (u64)s_d3d.vp_parity * s_d3d.vp_vertex_capacity * 256u
+                               + (u64)1000 * 256u);
+                           static const float tri[3][4] = {
+@@ -6911,13 +6927,21 @@
+         fprintf(stderr, "[VPVB] cannot grow upload buffer to %u vertices (hr=%08X)\n", capacity, (unsigned)hr);
+         return 0;
+     }
+-    /* Previous frames still reference the old upload buffer. Preserve both
+-     * parity regions and release it only after their GPU work completes. */
++    void* cpu = malloc((size_t)bd.Width);
++    if (!cpu) {
++        resource->lpVtbl->Unmap(resource, 0, NULL);
++        resource->lpVtbl->Release(resource);
++        return 0;
++    }
++    /* Never read back an UPLOAD heap: write-combined CPU reads stalled Aquos
++     * for seconds at each growth. Pending vertices live in cached RAM. Keep
++     * both parity regions and drain the GPU before releasing its old buffer. */
++    vp_copy_vertex_frames(cpu, capacity, s_d3d.vp_vb_mapped, s_d3d.vp_vertex_capacity);
+     wait_for_gpu();
+-    vp_copy_vertex_frames(mapped, capacity, s_d3d.vp_vb_mapped, s_d3d.vp_vertex_capacity);
+     s_d3d.vp_vb->lpVtbl->Unmap(s_d3d.vp_vb, 0, NULL);
+     s_d3d.vp_vb->lpVtbl->Release(s_d3d.vp_vb);
+-    s_d3d.vp_vb = resource; s_d3d.vp_vb_mapped = mapped;
++    free(s_d3d.vp_vb_mapped);
++    s_d3d.vp_vb = resource; s_d3d.vp_vb_mapped = cpu; s_d3d.vp_vb_upload = mapped;
+     s_d3d.vp_vertex_capacity = capacity;
+     fprintf(stderr, "[VPVB] grew to %u vertices per frame (%llu MB)\n", capacity, (unsigned long long)(bd.Width >> 20));
+     return 1;
+@@ -7717,6 +7741,13 @@
+     wait_for_gpu();
+     vp_release_frame_psos();
+
++    free(s_d3d.vp_vb_mapped);
++    s_d3d.vp_vb_mapped = NULL;
++    if (s_d3d.vp_vb) {
++        if (s_d3d.vp_vb_upload) s_d3d.vp_vb->lpVtbl->Unmap(s_d3d.vp_vb, 0, NULL);
++        s_d3d.vp_vb->lpVtbl->Release(s_d3d.vp_vb);
++        s_d3d.vp_vb = NULL; s_d3d.vp_vb_upload = NULL;
++    }
+     for (u32 i = 0; i < SAMPLER_MAX_PAGES; ++i) {
+         if (s_sampler_pages[i].heap) s_sampler_pages[i].heap->lpVtbl->Release(s_sampler_pages[i].heap);
+         memset(&s_sampler_pages[i], 0, sizeof(s_sampler_pages[i]));

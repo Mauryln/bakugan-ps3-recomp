@@ -68,6 +68,40 @@ carga al entrar a Aquos, trabas y audio que empieza antes que la imagen de
 gameplay. Separar carga invitada, preparación de shaders/draws y esperas FIFO
 antes de cambiar el reloj de audio o la política de cuadros completos.
 
+## Entrada a Aquos: flujo de vértices (`0037`)
+
+El perfil `aquos-loading-profile-20261101` muestra tres ampliaciones de buffer
+(384, 768 y 1536 MB), seguidas de un intervalo de 1,79 FPS: 10,324 s en submit,
+0,15 s en `render_frame` y 0,05 s en preparación de PSO. El crecimiento leía
+ambas mitades del antiguo recurso UPLOAD desde CPU. Es memoria write-combine,
+inadecuada para esa lectura masiva.
+
+`0037-d3d12-cpu-vertex-stream.patch` mantiene el flujo en RAM cacheada; el
+crecimiento conserva desde ella los datos y cada presentación copia solo los
+bytes usados de la mitad actual a UPLOAD. Mantiene fence, paridad y geometría.
+Las capturas posteriores a la GPU leen el upload; los dumps al registrar un
+draw leen el flujo CPU. La nueva RAM adicional equivale al buffer de vértices
+de doble paridad; en el pico observado puede llegar a 1536 MB.
+
+Con el cambio, el intervalo que incluye esas ampliaciones registra 3,52 FPS
+y 4,869 s en submit. Los intervalos contienen distinto número de draws, por
+lo que no equivalen a un benchmark exacto de una misma escena. El usuario
+confirmó que aún hay tirón, pero se recupera antes y el gameplay ya comienza
+a la par del audio. No se modificó el reloj de sonido.
+
+La vista de gameplay sigue lenta: unos 12–18 FPS según cámara/personajes.
+La subida completa agrega coste dentro de `render_frame`; no se presenta
+esta corrección de entrada como una mejora de FPS sostenidos. La prueba de
+capacidad conserva ambas paridades y ahora verifica subida exclusiva del
+prefijo usado, sin alterar el resto ni la mitad anterior. Build y las 20
+pruebas pasan (la prueba de samplers se repitió tras ajustar el lugar del
+helper de subida, que su extractor incluía accidentalmente).
+
+Comparaciones nuevas del usuario: `battle-arena-picture/emulador/` y
+`battle-arena-picture/recomp/`. La primera contiene también una captura con
+título de recomp (`083436`); usar las imágenes con barra RPCS3 como referencia
+de emulador. El usuario pide continuar con sombras/reflejos y su flujo.
+
 El log posterior vuelve a registrar `fifo recycle: drain stalled` (2000 ms).
 La corrección visual no resuelve ese aviso. El congelamiento por inactividad
 en menús queda como investigación separada y posterior a los efectos, por
