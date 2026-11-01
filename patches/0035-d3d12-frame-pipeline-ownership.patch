@@ -1,0 +1,103 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -364,6 +364,25 @@
+ } D3D12State;
+ 
+ static D3D12State s_d3d;
++/* Command lists do not retain their PSOs. Pins last until the next GPU fence. */
++static ID3D12PipelineState* s_frame_psos[MAX_DRAWS];
++static void vp_store_frame_pso(u32 draw, ID3D12PipelineState* pso)
++{
++    if (draw >= MAX_DRAWS) return;
++    if (pso) pso->lpVtbl->AddRef(pso);
++    ID3D12PipelineState* old = s_frame_psos[draw];
++    s_frame_psos[draw] = pso;
++    if (old) old->lpVtbl->Release(old);
++}
++
++static void vp_release_frame_psos(void)
++{
++    for (u32 draw = 0; draw < MAX_DRAWS; ++draw) {
++        if (s_frame_psos[draw]) s_frame_psos[draw]->lpVtbl->Release(s_frame_psos[draw]);
++        s_frame_psos[draw] = NULL;
++    }
++}
++
+ char g_rsx_title_base[128] = "ps3recomp";
+ static u32 s_dbg_last_draws = 0;
+ static u64 s_req_verts = 0, s_req_draws = 0, s_drop_draws = 0;
+@@ -2636,6 +2655,20 @@
+     return pso;
+ }
+ 
++static DXGI_FORMAT rsx_surface_dxgi(u32 fmt);
++static ID3D12PipelineState* vp_prepare_draw_pso(const D3D12DrawRecord* dr)
++{
++    if (!dr->fp_addr) return NULL;
++    u32 blend = dr->blend_key, alpha = dr->alpha_ctl;
++    static int opaque = -1;
++    if (opaque < 0) { const char* e = getenv("RX_OPAQUE"); opaque = e ? atoi(e) : 0; }
++    if (opaque && dr->rt_off == 0) { blend = 0; alpha = 0; }
++    return vp_get_fp_pso(dr->vs_idx, dr->fp_addr, blend, dr_num_rts(dr),
++        dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt) : DXGI_FORMAT_R8G8B8A8_UNORM,
++        dr->fp_exp32, dr->cmask, dr->cull, dr_cube_mask(dr), dr->depth_key,
++        alpha, dr->depth_bias, dr->slope_bias);
++}
++
+ /* Upload the guest texture for a VP draw into a per-frame texture slot
+  * (re-uploaded every frame: gcm/cube's plasma animates in guest memory).
+  * Returns the resource-cache index or -1. Must run while the
+@@ -4233,7 +4266,7 @@
+      * polygons). These workloads are a few draws/frame, so full serialisation
+      * costs little. */
+     wait_for_gpu();
+-
++    vp_release_frame_psos();
+     /* Compile the real vertex program once its microcode is captured, and keep
+      * the constant bank uploaded for the VS. */
+     /* The base VP pipeline gates the ENTIRE vertex-program draw pass below
+@@ -4719,12 +4752,7 @@
+         }
+         if (perf_on()) s_perf_srv += perf_now() - _sv0;
+         double _ps0 = perf_on() ? perf_now() : 0.0;
+-        if (dr->fp_addr) vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key,
+-                                       dr_num_rts(dr),
+-                                       dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
+-                                                  : DXGI_FORMAT_R8G8B8A8_UNORM,
+-                                       dr->fp_exp32, dr->cmask, dr->cull, dr_cube_mask(dr),
+-                                       dr->depth_key, dr->alpha_ctl, dr->depth_bias, dr->slope_bias);
++        vp_store_frame_pso(_d, vp_prepare_draw_pso(dr));
+         if (perf_on()) s_perf_pso += perf_now() - _ps0;
+     }
+ 
+@@ -5057,21 +5085,7 @@
+                 }
+                 /* Per-draw pipeline: prefer the guest's own compiled FP; fall
+                  * back to the hardcoded atlas/colour PS pair. */
+-                u32 _bkey = dr->blend_key, _actl = dr->alpha_ctl;
+-                /* RX_OPAQUE=1: A/B knob -- draw display-target ops with blending
+-                 * and alpha test forced off, telling "state hides the frame" from
+-                 * "the frame was never drawn". */
+-                { static int op = -1;
+-                  if (op < 0) { const char* e = getenv("RX_OPAQUE"); op = e ? atoi(e) : 0; }
+-                  if (op && dr->rt_off == 0) { _bkey = 0; _actl = 0; } }
+-                ID3D12PipelineState* dpso =
+-                    dr->fp_addr ? vp_get_fp_pso(dr->vs_idx, dr->fp_addr, _bkey,
+-                                                dr_num_rts(dr),
+-                                                dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
+-                                                           : DXGI_FORMAT_R8G8B8A8_UNORM,
+-                                                dr->fp_exp32, dr->cmask, dr->cull,
+-                                                dr_cube_mask(dr), dr->depth_key, _actl,
+-                                                dr->depth_bias, dr->slope_bias) : NULL;
++                ID3D12PipelineState* dpso = s_frame_psos[d];
+                 s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list,
+                                                          dpso ? dpso : vpso);
+                 /* Per-draw viewport: the guest rect when sane, else the
+@@ -7581,6 +7595,7 @@
+     if (!s_d3d.initialized) return;
+ 
+     wait_for_gpu();
++    vp_release_frame_psos();
+ 
+     /* Release D3D12 resources */
+     if (s_d3d.vertex_buffer) {

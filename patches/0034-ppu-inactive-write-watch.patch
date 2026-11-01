@@ -1,0 +1,47 @@
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -1567,6 +1567,13 @@
+ /* ppu_recomp.h's inline loads (vm_read*_inl) skip the out-of-line accessors'
+  * probes, so they run only while no read diagnostic is armed. */
+ extern "C" int vm_inline_ok = 0;
++/* Conservative during static initialization; fixed before guest execution. */
++static int s_vm_write_watch_enabled = 1;
++static int ppu_write_watch_env_enabled(void)
++{
++    return getenv("PPU_WVAL") != nullptr || getenv("PPU_WWATCH") != nullptr;
++}
++
+ static struct VmInlineInit {
+     VmInlineInit() {
+         static const char* const vars[] = {
+@@ -1575,6 +1582,7 @@
+         int d = 0;
+         for (int i = 0; vars[i]; i++) if (getenv(vars[i])) d = 1;
+         vm_inline_ok = !d;
++        s_vm_write_watch_enabled = ppu_write_watch_env_enabled();
+     }
+ } s_vm_inline_init;
+ 
+@@ -1792,7 +1800,7 @@
+     g_ww_lo = ww & ~15u;
+     g_ww_hi = (ww & ~15u) + len;
+ }
+-static inline void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra)
++static void barrier_watch_hit_slow(uint32_t a, uint32_t v, int width, void* ra)
+ {
+     /* PPU_WVAL=<hexvalue>: log every PPU store that WRITES this value, wherever
+      * it lands. PPU_WWATCH answers "who writes this address"; when a bad value is
+@@ -1911,6 +1919,13 @@
+             fprintf(stderr, "[sync-write] +0x%02X <- 0x%X (w%d) guest-fn=0x%08X\n",
+                     a - b, v, width, ppu_prof_resolve_host(ra));
+     }
++}
++
++static inline void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra)
++{
++    /* Preserve runtime-armed barrier probes; only omit inactive diagnostics. */
++    if (s_vm_write_watch_enabled || g_barrier_sync_watch)
++        barrier_watch_hit_slow(a, v, width, ra);
+ }
+ 
+ /* See the note on the forward declaration above ppu_stwcx32. */
