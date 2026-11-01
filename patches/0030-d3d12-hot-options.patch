@@ -1,0 +1,77 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -503,6 +503,16 @@
+     QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c);
+     return (double)c.QuadPart / (double)f.QuadPart;
+ }
++static int fp_constbuf_enabled(void)
++{
++    static int enabled = -1;
++    if (enabled < 0) {
++        const char* value = getenv("FP_CONSTBUF");
++        enabled = !value || value[0] != '0';
++    }
++    return enabled;
++}
++
+ static int perf_on(void)
+ {
+     static int v = -1;
+@@ -2176,7 +2186,7 @@
+         u32 usz = rsx_fp_program_size(vm_base + off, 4096);
+         if (usz == 0) usz = 64;
+         s_perf_pso_hashbytes += (int)usz;
+-        if (getenv("FP_CONSTBUF") && getenv("FP_CONSTBUF")[0] == '0') {
++        if (!fp_constbuf_enabled()) {
+             uhash = 2166136261u;
+             const u8* up = vm_base + off;
+             for (u32 i = 0; i < usz; i++) { uhash ^= up[i]; uhash *= 16777619u; }
+@@ -3315,7 +3325,9 @@
+          * has no fixed alpha test; guest FPs discard on it dynamically
+          * (wave's colour wheel is a disc via alpha test -- without it the
+          * palette drew as an opaque square). */
+-        if (dr && !getenv("NO_ALPHATEST")) {
++        static int no_alpha_test = -1;
++        if (no_alpha_test < 0) no_alpha_test = getenv("NO_ALPHATEST") != NULL;
++        if (dr && !no_alpha_test) {
+             { static int _at = 0;
+               if (((dr->alpha_ctl >> 16) & 1u) && PS3_LOG_FIRST(_at, 4))
+                   printf("[ALPHATEST] enable func=%u ref=%u\n",
+@@ -3437,10 +3449,13 @@
+     int uses_c03 = (vs_idx >= 0 && vs_idx < s_d3d.vp_vs_n)
+                        ? s_d3d.vp_vs[vs_idx].uses_c03 : s_d3d.vp_uses_c03;
+     float* c = (float*)dst;
+-    float c00 = c[0];
++    float c00 = st->vertex_constants[0][0];
+     int garbage = !(c00 > 0.0f && c00 < 8.0f);
+-    if (getenv("VP_NOFIXPROJ")) garbage = 0;
+-    if ((garbage && uses_c03) || getenv("VP_FIXPROJ")) {
++    static int no_fix_proj = -1, fix_proj = -1;
++    if (no_fix_proj < 0) no_fix_proj = getenv("VP_NOFIXPROJ") != NULL;
++    if (fix_proj < 0) fix_proj = getenv("VP_FIXPROJ") != NULL;
++    if (no_fix_proj) garbage = 0;
++    if ((garbage && uses_c03) || fix_proj) {
+         { static int _fb = 0; if (PS3_LOG_FIRST(_fb, 6))
+             printf("[VPFB] fallback proj on draw slot %u (c00=%g vs_idx=%d)\n",
+                    slot, c00, vs_idx); }
+@@ -3451,7 +3466,8 @@
+     }
+     /* Opt-in, bounded snapshots of the exact shader input for 3D diagnosis. */
+     {
+-        const char* dir = getenv("RSX_DRAW_DUMP");
++        static const char* dir = (const char*)1;
++        if (dir == (const char*)1) dir = getenv("RSX_DRAW_DUMP");
+         static unsigned char seen[VP_VS_CACHE];
+         if (dir && dr && dr->rt_off && dr->vertex_count && vs_idx >= 0 &&
+             vs_idx < VP_VS_CACHE && !seen[vs_idx]) {
+@@ -6050,7 +6066,9 @@
+ 
+ static void vp_attrs_dbg(const rsx_state* state)
+ {
+-    if (!getenv("VP_ATTRS")) return;
++    static int enabled = -1;
++    if (enabled < 0) enabled = getenv("VP_ATTRS") != NULL;
++    if (!enabled) return;
+     /* VP_ATTRS_FP=<hex shader_program>: dump only the draws that use one
+      * fragment program. Without it the first six draws are whatever the frame
+      * happens to start with, which is never the mesh being investigated. */

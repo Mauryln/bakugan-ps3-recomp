@@ -1,0 +1,53 @@
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1710,8 +1710,17 @@
+ static HANDLE s_gcm_kick_ev = NULL;
+ void* cellGcm_fifo_kick_event(void)
+ {
+-    if (!s_gcm_kick_ev) s_gcm_kick_ev = CreateEventA(NULL, FALSE, FALSE, NULL);
+-    return (void*)s_gcm_kick_ev;
++    HANDLE event = (HANDLE)InterlockedCompareExchangePointer(
++        (PVOID volatile*)&s_gcm_kick_ev, NULL, NULL);
++    if (!event) {
++        HANDLE created = CreateEventA(NULL, FALSE, FALSE, NULL);
++        if (!created) return NULL;
++        event = (HANDLE)InterlockedCompareExchangePointer(
++            (PVOID volatile*)&s_gcm_kick_ev, created, NULL);
++        if (event) CloseHandle(created);
++        else event = created;
++    }
++    return (void*)event;
+ }
+ 
+ /* The present thread's idle wait. It used to be a flat Sleep(4), which meant
+@@ -1755,8 +1764,10 @@
+         dry = (s_ref_qhead == s_ref_qtail);
+     }
+     ReleaseSRWLockExclusive(&s_ref_pub_lock);
+-    if (dry && s_gcm_kick_ev)
+-        SetEvent(s_gcm_kick_ev);       /* dry: ask the present thread to walk */
++    if (dry) {
++        HANDLE event = (HANDLE)cellGcm_fifo_kick_event();
++        if (event) SetEvent(event);    /* dry: ask the present thread to walk */
++    }
+ }
+ 
+ static uint64_t s_ft_sema_t0;          /* PS3_FTRACE: when the walker began waiting on the current acquire */
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -1938,6 +1938,15 @@
+ #endif
+     { uint32_t _v = v;
+       v = __builtin_bswap32(v); VM_WRITE_COH(a, &v, 4);
++#ifdef _WIN32
++      /* Publishing PUT makes already-written commands runnable. Wake the
++       * consumer after the store, including label waits which never poll REF. */
++      if ((uint32_t)a == VM_HLE_INJECT_BASE + 0x2000u) {
++          extern void* cellGcm_fifo_kick_event(void);
++          HANDLE event = (HANDLE)cellGcm_fifo_kick_event();
++          if (event) SetEvent(event);
++      }
++#endif
+       /* Raw SPU problem state: run control, mailboxes and signal notification
+        * have side effects. The plain store above still happens -- the registers
+        * are guest memory and the PPU reads most of them straight back. */

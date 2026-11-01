@@ -1,0 +1,22 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -5998,11 +5998,16 @@
+ static void vp_fetch_vertex(const rsx_state* state, u32 vi, VPSlot* out16)
+ {
+     if (s_vertex_fetch_plan.state != state) vp_prepare_vertex_fetch(state);
+-    memcpy(out16, s_vertex_fetch_plan.defaults, sizeof(s_vertex_fetch_plan.defaults));
++    /* UPLOAD heaps are write-combined. Assemble in cached CPU memory before
++     * one sequential copy: overwriting defaults attribute by attribute flushes
++     * partially filled write-combine lines on every guest vertex. */
++    VPSlot vertex[16];
++    memcpy(vertex, s_vertex_fetch_plan.defaults, sizeof(vertex));
+     for (u32 n = 0; n < s_vertex_fetch_plan.count; ++n) {
+         u32 i = s_vertex_fetch_plan.active[n];
+-        rsx_fetch_attrib(state, (int)i, vi, out16[i].v);
+-    }
++        rsx_fetch_attrib(state, (int)i, vi, vertex[i].v);
++    }
++    memcpy(out16, vertex, sizeof(vertex));
+ }
+ 
+ static void read_vp_vertex(const rsx_state* state, u32 vi, VPSlot* out16)

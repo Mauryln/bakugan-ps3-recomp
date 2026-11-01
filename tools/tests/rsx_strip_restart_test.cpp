@@ -17,13 +17,17 @@ static VPSlot buffer[MAX_VERTICES * 16];
 static struct { void* vp_vb_mapped = buffer; u32 vp_vb_offset = 0; int vp_parity = 0; u32 vp_vertex_capacity = MAX_VERTICES; } s_d3d;
 uint8_t* vm_base = reinterpret_cast<uint8_t*>(buffer);
 static std::vector<u32> indices;
+static unsigned fetched_vertices;
+static unsigned vertex_revision;
 static u32 read_guest_index(const rsx_state*, u32 i) { return indices.at(i); }
 static void read_vp_vertex(const rsx_state*, u32 i, VPSlot* dst)
 {
     // Sentinel indices must never reach the guest vertex fetch.
     assert(i != 0xffff && i != 0xffffffff);
+    ++fetched_vertices;
     memset(dst, 0, 16 * sizeof(*dst));
     dst[0].v[0] = static_cast<float>(i);
+    dst[0].v[1] = static_cast<float>(vertex_revision);
 }
 #include "strip_upload.inc"
 
@@ -49,9 +53,23 @@ int main()
     // The next packet continues the strip, including winding parity.
     s_d3d.vp_vb_offset = 0; ++st.begin_epoch;
     indices = {0, 1, 2, 3, 4, 5};
+    fetched_vertices = 0;
+    upload_strip_vp_indexed(&st, 0, 6, 0);
+    expect({0, 1, 2, 1, 3, 2, 2, 3, 4, 3, 5, 4});
+    assert(fetched_vertices == 6); // Shared strip vertices are decoded once per packet.
+    s_d3d.vp_vb_offset = 0; ++st.begin_epoch;
     upload_strip_vp_indexed(&st, 0, 3, 0);
+    ++vertex_revision; // Changed guest arrays must invalidate the packet cache.
     upload_strip_vp_indexed(&st, 3, 3, 0);
     expect({0, 1, 2, 1, 3, 2, 2, 3, 4, 3, 5, 4});
+    for (unsigned i = 0; i < 3; ++i) assert(buffer[i * 16].v[1] == 0);
+    for (unsigned i = 3; i < 12; ++i) assert(buffer[i * 16].v[1] == 1);
+
+    // Hash collisions must decode the new reference rather than reuse a slot.
+    s_d3d.vp_vb_offset = 0; ++st.begin_epoch;
+    indices = {0, 16, 32, 48, 64, 80};
+    upload_strip_vp_indexed(&st, 0, 6, 0);
+    expect({0, 16, 32, 16, 48, 32, 32, 48, 64, 48, 80, 64});
 
     // Short packets, adjacent cuts and a cut at a packet boundary.
     s_d3d.vp_vb_offset = 0; ++st.begin_epoch;

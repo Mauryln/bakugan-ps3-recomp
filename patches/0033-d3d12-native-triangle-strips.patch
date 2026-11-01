@@ -1,0 +1,151 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -4914,6 +4914,7 @@
+             s_d3d.cmd_list->lpVtbl->IASetVertexBuffers(s_d3d.cmd_list, 0, 1, &vbv);
+             D3D12_GPU_DESCRIPTOR_HANDLE gh_base;
+             s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &gh_base);
++            u32 vp_last_topology = RSX_TOPOLOGY_TRIANGLES;
+             int cur_rt = -1;                       /* target A: -1 = backbuffer */
+             float vp_last_w = 0, vp_last_h = 0;    /* for DRAWARGS */
+             float dvp_x = 0, dvp_y = 0, dvp_w = 0, dvp_h = 0;  /* per-draw, for DRAWARGS */
+@@ -5153,6 +5154,11 @@
+                       s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(
+                           s_d3d.cmd_list, bn, brh, FALSE, &dsv_handle);
+                   } }
++                if (dr->topology != vp_last_topology) {
++                    s_d3d.cmd_list->lpVtbl->IASetPrimitiveTopology(
++                        s_d3d.cmd_list, topo_to_d3d(dr->topology));
++                    vp_last_topology = dr->topology;
++                }
+                 s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list,
+                     dr->vertex_count, 1, dr->vb_byte_offset / 256, 0);
+                 { static int cap = -1, n = 0;
+@@ -6640,6 +6646,98 @@
+     return o;
+ }
+ 
++/* Preserve a strip instead of uploading three copies of each shared vertex.
++ * Degenerate bridges cut restart-separated segments without joining their
++ * geometry; a leading duplicate preserves odd packet-continuation winding. */
++static int vp_native_strips_enabled(void)
++{
++    static int enabled = -1;
++    if (enabled < 0) {
++        const char* value = getenv("RSX_NATIVE_STRIPS");
++        enabled = !value || value[0] != '0';
++    }
++    return enabled;
++}
++
++static u32 upload_native_strip_vp_indexed(const rsx_state* state, u32 first, u32 count)
++{
++    extern uint8_t* vm_base;
++    if (!state || !vm_base || !s_d3d.vp_vb_mapped ||
++        !state->vertex_attribs[0].enabled) return 0;
++    static struct {
++        int valid;
++        u32 epoch, next, length, previous[2];
++    } strip;
++    if (!strip.valid || strip.epoch != state->begin_epoch || strip.next != first) {
++        strip.valid = 1;
++        strip.epoch = state->begin_epoch;
++        strip.length = 0;
++    }
++    strip.next = first + count;
++    const int is_u16 = ((state->index_array_dma >> 4) & 0xF) == 1;
++    const int restart = state->restart_index_enable &&
++        (!is_u16 || state->restart_index <= 0xFFFFu);
++    u32 maxv = (s_d3d.vp_vertex_capacity * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
++    VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
++        + (u64)s_d3d.vp_parity * s_d3d.vp_vertex_capacity * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
++    VPSlot vertex[16], last[16], carry[16];
++    VPSlot cache[16][16];
++    u32 cache_tags[16], cache_valid = 0;
++    u32 o = 0;
++    int seeded = 0, cut = 0;
++#define VP_STRIP_EMIT(v) do { memcpy(&out[o * 16], (v), sizeof(vertex)); ++o; } while (0)
++#define VP_STRIP_FETCH(index, dst) do { \
++    u32 ref = (index), slot = ref & 15u, bit = 1u << slot; \
++    if (!(cache_valid & bit) || cache_tags[slot] != ref) { \
++        read_vp_vertex(state, ref, cache[slot]); \
++        cache_tags[slot] = ref; cache_valid |= bit; \
++    } \
++    memcpy((dst), cache[slot], sizeof(vertex)); \
++    } while (0)
++    for (u32 k = 0; k < count; ++k) {
++        u32 index = read_guest_index(state, first + k);
++        if (restart && index == state->restart_index) {
++            strip.length = 0;
++            cut = 1;
++            continue;
++        }
++        u32 needed = 1;
++        if (!seeded) needed += strip.length >= 2 ? 2 + (strip.length & 1u) : strip.length;
++        if (cut && o) needed += 2 + (o & 1u);
++        if (o + needed > maxv) break;
++        if (!seeded) {
++            if (strip.length >= 2) {
++                VP_STRIP_FETCH(strip.previous[0], carry);
++                VP_STRIP_EMIT(carry);
++                if (strip.length & 1u) VP_STRIP_EMIT(carry);
++                VP_STRIP_FETCH(strip.previous[1], carry);
++                VP_STRIP_EMIT(carry);
++            } else if (strip.length == 1) {
++                VP_STRIP_FETCH(strip.previous[1], carry);
++                VP_STRIP_EMIT(carry);
++            }
++            seeded = 1;
++        }
++        VP_STRIP_FETCH(index, vertex);
++        if (cut && o) {
++            u32 old_count = o;
++            VP_STRIP_EMIT(last);
++            VP_STRIP_EMIT(vertex);
++            if (old_count & 1u) VP_STRIP_EMIT(vertex);
++        }
++        cut = 0;
++        VP_STRIP_EMIT(vertex);
++        memcpy(last, vertex, sizeof(last));
++        strip.previous[0] = strip.previous[1];
++        strip.previous[1] = index;
++        strip.length++;
++    }
++#undef VP_STRIP_EMIT
++#undef VP_STRIP_FETCH
++    s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
++    return o;
++}
++
+ static u32 vp_capacity_for(u32 capacity, u32 required)
+ {
+     if (!capacity) capacity = 1;
+@@ -7039,7 +7137,7 @@
+     }
+     if (!s_d3d.pipeline_ready) return;
+     if (count == 0 || count > MAX_VERTICES) return;
+-    if (s_d3d.vp_vb_mapped && !vp_reserve_vertices(count * 3u)) return;
++    if (s_d3d.vp_vb_mapped && !vp_reserve_vertices(count * 3u + 3u)) return;
+     if (!s_d3d.vp_vb_mapped || !s_d3d.vp_root_sig) return;
+ 
+     /* Expand through the VP path (indices resolved CPU-side): QUADS -> two
+@@ -7049,7 +7147,9 @@
+     u32 rec = s_d3d.vp_vb_offset;
+     if (primitive == RSX_PRIMITIVE_QUADS)             emitted = upload_quads_vp_indexed(s_d3d.current_rsx_state, first, count);
+     else if (primitive == RSX_PRIMITIVE_TRIANGLES)    emitted = upload_tris_vp_indexed(s_d3d.current_rsx_state, first, count);
+-    else if (primitive == RSX_PRIMITIVE_TRIANGLE_STRIP) emitted = upload_strip_vp_indexed(s_d3d.current_rsx_state, first, count, 0);
++    else if (primitive == RSX_PRIMITIVE_TRIANGLE_STRIP) emitted = vp_native_strips_enabled()
++        ? upload_native_strip_vp_indexed(s_d3d.current_rsx_state, first, count)
++        : upload_strip_vp_indexed(s_d3d.current_rsx_state, first, count, 0);
+     else if (primitive == RSX_PRIMITIVE_TRIANGLE_FAN)   emitted = upload_strip_vp_indexed(s_d3d.current_rsx_state, first, count, 1);
+     else {
+         static int _skip = 0;
+@@ -7079,7 +7179,8 @@
+         D3D12DrawRecord* dr = &s_d3d.draws[s_d3d.draw_count];
+         dr->vb_byte_offset = rec;
+         dr->vertex_count   = emitted;
+-        dr->topology       = RSX_TOPOLOGY_TRIANGLES;
++        dr->topology       = primitive == RSX_PRIMITIVE_TRIANGLE_STRIP && vp_native_strips_enabled()
++            ? RSX_TOPOLOGY_TRIANGLE_STRIP : RSX_TOPOLOGY_TRIANGLES;
+         dr->textured       = s_d3d.tex_bound;
+         dr->is_vp          = 1;
+         dr->fp_addr = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->shader_program : 0;

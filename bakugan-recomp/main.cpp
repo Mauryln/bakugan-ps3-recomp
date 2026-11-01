@@ -114,6 +114,9 @@ void     cellGcmTickVBlank(void);
 void     cellGcmTickFlip(void);
 int      cellGcm_take_flip_pending(void);
 void     cellGcm_rsx_process_fifo(void);      /* drain get -> put */
+#ifdef _WIN32
+void     cellGcm_fifo_kick_wait(unsigned ms);
+#endif
 unsigned cellGcm_flip_request_count(void);
 }
 
@@ -220,7 +223,13 @@ static DWORD WINAPI frame_clock(LPVOID)
     ULONGLONG next_tick = GetTickCount64();
 
     for (;;) {
+#ifdef _WIN32
+        /* A guest waiting on an RSX reference wakes the consumer immediately.
+         * A fixed sleep here adds a scheduler delay to every render-pass fence. */
+        cellGcm_fifo_kick_wait(4);
+#else
         Sleep(4);
+#endif
         ULONGLONG now = GetTickCount64();
 
         unsigned due = frame_clock_due_ticks(now, &next_tick);
@@ -539,6 +548,10 @@ int main(int argc, char** argv)
      * no static image to lift; execute live bytes and rejoin compiled code.
      * Keep an explicit 0 override for diagnosis. Set before any worker starts. */
     if (!getenv("SPU_INTERP_UNLIFTED")) _putenv_s("SPU_INTERP_UNLIFTED", "1");
+    /* This title has complete FIFO flip markers. A clear is a render pass,
+     * not a reliable frame boundary: arena draw counts must not make later
+     * menu frames accumulate. Preserve the game's own 30 Hz pacing. */
+    if (!getenv("RSX_ACCUM_FRAME")) _putenv_s("RSX_ACCUM_FRAME", "1");
     /* 1 ms timer resolution. The default granularity is about 15.6 ms, which
      * inflates every shorter wait the title makes and throttles the whole
      * thing. POSIX timers are already fine-grained. */
