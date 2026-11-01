@@ -1,0 +1,258 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -102,6 +102,7 @@
+         u32 w, h, fmt;  /* dims + RSX base format */
+         u32 pitch;      /* CONTROL3 source row pitch */
+         u32 ctrl1;      /* NV4097 TEXTURE_CONTROL1: component remap crossbar */
++        u32 sampler_address, sampler_filter, sampler_control, sampler_border;
+         u32 mips;       /* SET_TEXTURE_FORMAT bits 16..31: mipmap level count.
+                          * Cube faces sit one whole mip pyramid apart, so this
+                          * is what sets the face stride. */
+@@ -112,6 +113,7 @@
+         int set;
+     } tex[RSX_MAX_TEXTURES];
+     int tex_rt[RSX_MAX_TEXTURES];      /* pre-pass: OffRT index sampled by unit, -1 = none */
++    u32 sampler_table; /* immutable per-draw sampler heap/table */
+     int tex_slot;       /* legacy single-slot path (atlas); -1 = none */
+     int vs_idx;         /* VPVSEntry slot for this draw's vertex program (-1 = primary) */
+     int blend;          /* guest blend enable at draw time */
+@@ -364,6 +366,107 @@
+ } D3D12State;
+
+ static D3D12State s_d3d;
++/* Complete sampler tables stay immutable until the frame fence. A heap may
++ * contain at most 2048 samplers; additional pages cover even unique draws. */
++#define SAMPLER_TABLES_PER_PAGE (2048 / RSX_MAX_TEXTURES)
++#define SAMPLER_MAX_PAGES ((MAX_DRAWS + SAMPLER_TABLES_PER_PAGE - 1) / SAMPLER_TABLES_PER_PAGE)
++static struct {
++    ID3D12DescriptorHeap* heap;
++    u32 count;
++    D3D12_SAMPLER_DESC tables[SAMPLER_TABLES_PER_PAGE][RSX_MAX_TEXTURES];
++} s_sampler_pages[SAMPLER_MAX_PAGES];
++static u32 s_sampler_inc;
++
++static D3D12_TEXTURE_ADDRESS_MODE rsx_sampler_wrap(u32 wrap)
++{
++    switch (wrap & 15u) {
++    case 1: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
++    case 2: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
++    case 4: return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
++    case 6: case 7: case 8: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR_ONCE;
++    default: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
++    }
++}
++
++/* GCM field layout shared with the live draw backend. Extended CLAMP and
++ * MIRROR modes use D3D's edge approximation; convolution uses linear. */
++static D3D12_SAMPLER_DESC rsx_sampler_desc(u32 address, u32 filter, u32 control, u32 border)
++{
++    D3D12_SAMPLER_DESC d = {0};
++    u32 minf = (filter >> 16) & 7u, magf = (filter >> 24) & 7u;
++    D3D12_FILTER_TYPE mn = (minf == 2 || minf == 4 || minf == 6 || minf == 7)
++        ? D3D12_FILTER_TYPE_LINEAR : D3D12_FILTER_TYPE_POINT;
++    D3D12_FILTER_TYPE mg = (magf == 2 || magf == 4)
++        ? D3D12_FILTER_TYPE_LINEAR : D3D12_FILTER_TYPE_POINT;
++    D3D12_FILTER_TYPE mp = minf >= 5 ? D3D12_FILTER_TYPE_LINEAR : D3D12_FILTER_TYPE_POINT;
++    d.Filter = D3D12_ENCODE_BASIC_FILTER(mn, mg, mp, D3D12_FILTER_REDUCTION_TYPE_STANDARD);
++    d.AddressU = rsx_sampler_wrap(address);
++    d.AddressV = rsx_sampler_wrap(address >> 8);
++    d.AddressW = rsx_sampler_wrap(address >> 16);
++    d.MinLOD = (float)((control >> 19) & 0xFFFu) / 256.0f;
++    d.MaxLOD = minf >= 3 ? (float)((control >> 7) & 0xFFFu) / 256.0f : 0.0f;
++    if (d.MaxLOD < d.MinLOD) d.MaxLOD = d.MinLOD;
++    int bias = (int)(filter & 0x1FFFu); /* signed 5.8 fixed point */
++    if (bias & 0x1000) bias -= 0x2000;
++    d.MipLODBias = (float)bias / 256.0f;
++    d.MaxAnisotropy = 1;
++    d.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
++    d.BorderColor[0] = (float)((border >> 16) & 255u) / 255.0f;
++    d.BorderColor[1] = (float)((border >> 8) & 255u) / 255.0f;
++    d.BorderColor[2] = (float)(border & 255u) / 255.0f;
++    d.BorderColor[3] = (float)((border >> 24) & 255u) / 255.0f;
++    return d;
++}
++
++/* Called after wait_for_gpu, before opening the next command list. */
++static int rsx_prepare_samplers(void)
++{
++    for (u32 p = 0; p < SAMPLER_MAX_PAGES; ++p) s_sampler_pages[p].count = 0;
++    s_sampler_inc = s_d3d.device->lpVtbl->GetDescriptorHandleIncrementSize(
++        s_d3d.device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
++    u32 page = 0;
++    for (u32 i = 0; i < s_d3d.draw_count && i < MAX_DRAWS; ++i) {
++        D3D12DrawRecord* dr = &s_d3d.draws[i];
++        if (!dr->is_vp || dr->is_clear) continue;
++        D3D12_SAMPLER_DESC table[RSX_MAX_TEXTURES];
++        for (u32 u = 0; u < RSX_MAX_TEXTURES; ++u) {
++            table[u] = rsx_sampler_desc(0x30303u, 0x01012000u, 0, 0);
++            if (dr->tex[u].set && (dr->sampled_units & (1u << u)))
++                table[u] = rsx_sampler_desc(dr->tex[u].sampler_address,
++                    dr->tex[u].sampler_filter, dr->tex[u].sampler_control, dr->tex[u].sampler_border);
++        }
++        u32 slot;
++        for (slot = 0; slot < s_sampler_pages[page].count; ++slot)
++            if (!memcmp(table, s_sampler_pages[page].tables[slot], sizeof(table))) break;
++        if (slot == SAMPLER_TABLES_PER_PAGE) { ++page; slot = 0; }
++        if (!s_sampler_pages[page].heap) {
++            D3D12_DESCRIPTOR_HEAP_DESC hd = {0};
++            hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
++            hd.NumDescriptors = 2048;
++            hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
++            HRESULT hr = s_d3d.device->lpVtbl->CreateDescriptorHeap(s_d3d.device, &hd,
++                &IID_ID3D12DescriptorHeap, (void**)&s_sampler_pages[page].heap);
++            if (FAILED(hr)) {
++                fprintf(stderr, "[D3D12] sampler heap allocation failed (0x%08lX)\n", hr);
++                return 0;
++            }
++        }
++        if (slot == s_sampler_pages[page].count) {
++            D3D12_CPU_DESCRIPTOR_HANDLE cpu;
++            s_sampler_pages[page].heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_sampler_pages[page].heap, &cpu);
++            cpu.ptr += (size_t)slot * RSX_MAX_TEXTURES * s_sampler_inc;
++            for (u32 u = 0; u < RSX_MAX_TEXTURES; ++u) {
++                s_d3d.device->lpVtbl->CreateSampler(s_d3d.device, &table[u], cpu);
++                cpu.ptr += s_sampler_inc;
++            }
++            memcpy(s_sampler_pages[page].tables[slot], table, sizeof(table));
++            ++s_sampler_pages[page].count;
++        }
++        dr->sampler_table = page * SAMPLER_TABLES_PER_PAGE + slot;
++    }
++    return 1;
++}
++
+ /* Command lists do not retain their PSOs. Pins last until the next GPU fence. */
+ static ID3D12PipelineState* s_frame_psos[MAX_DRAWS];
+ static void vp_store_frame_pso(u32 draw, ID3D12PipelineState* pso)
+@@ -1172,21 +1275,21 @@
+
+     /* ---------------------------------------------------------------
+      * Real vertex-program path resources: root signature (CBV b0 for the
+-     * vp_c[] bank + SRV t0 + static sampler s0), a raw-float4 vertex buffer,
++     * vp_c[] bank + texture and sampler tables), a raw-float4 vertex buffer,
+      * and the constant-bank buffer. The PSO itself is built lazily once the
+      * game uploads its VP microcode (render_frame).
+      * ---------------------------------------------------------------*/
+     {
+         /* RSX fragment texture SRV table (t0-t15) so decompiled fragment programs can
+          * sample all 16 texture units; the hardcoded atlas/colour PSs use only
+-         * t0 and are unaffected. Matching 16 static samplers s0-s15. */
++         * t0 and are unaffected. Samplers s0-s15 are snapshotted per draw. */
+         D3D12_DESCRIPTOR_RANGE srv_range = {0};
+         srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+         srv_range.NumDescriptors = RSX_MAX_TEXTURES;
+         srv_range.BaseShaderRegister = 0;
+         srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+-        D3D12_ROOT_PARAMETER rp[3] = {0};
++        D3D12_ROOT_PARAMETER rp[4] = {0};
+         rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;   /* b0 = vp_c bank */
+         rp[0].Descriptor.ShaderRegister = 0;
+         rp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+@@ -1198,22 +1301,18 @@
+         rp[2].Descriptor.ShaderRegister = 1;
+         rp[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+-        D3D12_STATIC_SAMPLER_DESC samp[RSX_MAX_TEXTURES] = {0};
+-        for (int _s = 0; _s < RSX_MAX_TEXTURES; _s++) {
+-            samp[_s].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+-            samp[_s].AddressU = samp[_s].AddressV = samp[_s].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+-            samp[_s].ShaderRegister = (UINT)_s;
+-            samp[_s].MaxLOD = D3D12_FLOAT32_MAX;
+-            samp[_s].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+-        }
+-        /* s0 keeps point/clamp: the dbgfont atlas PS samples glyph cells and
+-         * linear filtering bleeds neighbouring glyphs. */
+-        samp[0].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+-        samp[0].AddressU = samp[0].AddressV = samp[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
++        D3D12_DESCRIPTOR_RANGE sampler_range = {0};
++        sampler_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
++        sampler_range.NumDescriptors = RSX_MAX_TEXTURES;
++        sampler_range.BaseShaderRegister = 0;
++        sampler_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
++        rp[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
++        rp[3].DescriptorTable.NumDescriptorRanges = 1;
++        rp[3].DescriptorTable.pDescriptorRanges = &sampler_range;
++        rp[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+         D3D12_ROOT_SIGNATURE_DESC rd = {0};
+-        rd.NumParameters = 3; rd.pParameters = rp;
+-        rd.NumStaticSamplers = RSX_MAX_TEXTURES; rd.pStaticSamplers = samp;
++        rd.NumParameters = 4; rd.pParameters = rp;
+         rd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+         ID3DBlob* sig = NULL; ID3DBlob* err = NULL;
+@@ -1574,11 +1673,13 @@
+                     r->tex_rt[0],r->tex_rt[1],r->tex_rt[2],r->tex_rt[3]);
+                 for (int u = 0; u < RSX_MAX_TEXTURES; u++)
+                     if (r->tex[u].set)
+-                        fprintf(mf, "      t%d off=0x%08X fmt=0x%02X (%s%s) %ux%u remap=0x%04X\n", u,
++                        fprintf(mf, "      t%d off=0x%08X fmt=0x%02X (%s%s) %ux%u remap=0x%04X address=%08X filter=%08X control=%08X border=%08X\n", u,
+                                 r->tex[u].off, r->tex[u].fmt,
+                                 (r->tex[u].fmt & 0x20) ? "LN" : "SZ",
+                                 (r->tex[u].fmt & 0x40) ? ",NR" : "",
+-                                r->tex[u].w, r->tex[u].h, r->tex[u].ctrl1 & 0xFFFF);
++                                r->tex[u].w, r->tex[u].h, r->tex[u].ctrl1 & 0xFFFF,
++                                r->tex[u].sampler_address, r->tex[u].sampler_filter,
++                                r->tex[u].sampler_control, r->tex[u].sampler_border);
+             }
+         }
+         /* Per-draw VP constant banks for the first few offscreen-RT geometry
+@@ -3331,6 +3432,12 @@
+     const rsx_state* st = s_d3d.current_rsx_state;
+     if (!s_d3d.vp_cb_mapped || !st || slot >= MAX_DRAWS) return;
+     if (dr) {
++        for (u32 u = 0; u < RSX_MAX_TEXTURES; ++u) {
++            dr->tex[u].sampler_address = st->textures[u].address;
++            dr->tex[u].sampler_filter = st->textures[u].filter;
++            dr->tex[u].sampler_control = st->textures[u].control0;
++            dr->tex[u].sampler_border = st->textures[u].border_color;
++        }
+         extern uint8_t* vm_base;
+         extern u32 cellGcmResolveLocated(int, u32);
+         dr->sampled_units = 1u; /* legacy atlas fallback uses t0 */
+@@ -4267,6 +4374,7 @@
+      * costs little. */
+     wait_for_gpu();
+     vp_release_frame_psos();
++    if (!rsx_prepare_samplers()) return;
+     /* Compile the real vertex program once its microcode is captured, and keep
+      * the constant bank uploaded for the VS. */
+     /* The base VP pipeline gates the ENTIRE vertex-program draw pass below
+@@ -4943,6 +5051,7 @@
+             D3D12_GPU_DESCRIPTOR_HANDLE gh_base;
+             s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &gh_base);
+             u32 vp_last_topology = RSX_TOPOLOGY_TRIANGLES;
++            u32 bound_sampler_page = ~0u;
+             int cur_rt = -1;                       /* target A: -1 = backbuffer */
+             float vp_last_w = 0, vp_last_h = 0;    /* for DRAWARGS */
+             float dvp_x = 0, dvp_y = 0, dvp_w = 0, dvp_h = 0;  /* per-draw, for DRAWARGS */
+@@ -5119,6 +5228,17 @@
+                         rt != cur_m[0] && rt != cur_m[1] && rt != cur_m[2])
+                         off_rt_transition(rt, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                 }
++                u32 sampler_page = dr->sampler_table / SAMPLER_TABLES_PER_PAGE;
++                if (sampler_page != bound_sampler_page) {
++                    ID3D12DescriptorHeap* heaps[] = {s_d3d.srv_heap, s_sampler_pages[sampler_page].heap};
++                    s_d3d.cmd_list->lpVtbl->SetDescriptorHeaps(s_d3d.cmd_list, 2, heaps);
++                    bound_sampler_page = sampler_page;
++                }
++                D3D12_GPU_DESCRIPTOR_HANDLE sh;
++                s_sampler_pages[sampler_page].heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(
++                    s_sampler_pages[sampler_page].heap, &sh);
++                sh.ptr += (u64)(dr->sampler_table % SAMPLER_TABLES_PER_PAGE) * RSX_MAX_TEXTURES * s_sampler_inc;
++                s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 3, sh);
+                 D3D12_GPU_DESCRIPTOR_HANDLE gh = gh_base;
+                 gh.ptr += (u64)(DRAW_SRV_BASE + d * RSX_MAX_TEXTURES) * s_d3d.srv_inc;
+                 s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 1, gh);
+@@ -7597,6 +7717,10 @@
+     wait_for_gpu();
+     vp_release_frame_psos();
+
++    for (u32 i = 0; i < SAMPLER_MAX_PAGES; ++i) {
++        if (s_sampler_pages[i].heap) s_sampler_pages[i].heap->lpVtbl->Release(s_sampler_pages[i].heap);
++        memset(&s_sampler_pages[i], 0, sizeof(s_sampler_pages[i]));
++    }
+     /* Release D3D12 resources */
+     if (s_d3d.vertex_buffer) {
+         s_d3d.vertex_buffer->lpVtbl->Unmap(s_d3d.vertex_buffer, 0, NULL);

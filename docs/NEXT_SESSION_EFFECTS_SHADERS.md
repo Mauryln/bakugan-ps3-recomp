@@ -1,5 +1,10 @@
 # Próxima sesión — efectos y shaders (cierre 31/10/2026)
 
+**Actualización 01/11/2026:** se reprodujo y corrigió un desajuste de samplers
+en Aquos (`0036`); build y 20 pruebas correctas. El usuario confirmó cascadas
+y lluvia; quedan reflejo distorsionado y trabas de entrada desde la carga,
+con audio antes que gameplay. Ver [EFFECTS_AQUOS_2026-11-01.md](EFFECTS_AQUOS_2026-11-01.md).
+
 **Actualización posterior de rendimiento:** leer
 [PERFORMANCE_2026-10-31.md](PERFORMANCE_2026-10-31.md). Se conservan cuadros
 completos en flips, strips nativos y el límite de 30 FPS. El usuario confirmó
