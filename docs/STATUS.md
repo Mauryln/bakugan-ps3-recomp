@@ -1,5 +1,13 @@
 # Estado del port — Bakugan: Battle Brawlers (BLES00758)
 
+Actualización 01/11/2026: samplers por draw corrigen cascadas y lluvia de Aquos;
+flujo de vértices en RAM reduce la demora de entrada y el usuario confirma
+que imagen y audio comienzan juntos. Persisten reflejos distorsionados, sombras
+y gameplay de 12–18 FPS. La prueba de profundidad que provocaba blancos fue
+retirada. Build Release y 20/20 pruebas de render/FIFO/pipeline correctas;
+36 parches aplican sobre toolkit limpio. Detalles:
+[EFFECTS_AQUOS_2026-11-01.md](EFFECTS_AQUOS_2026-11-01.md).
+
 Última actualización (31/10/2026): **Fixed gameplay Battle Arena: turno del jugador y CPU, texturas del campo y cartas corregidos.** Confirmado visualmente por el usuario.
 
 **Rendimiento, actualización posterior del 31/10:** cinemáticas y regreso al menú

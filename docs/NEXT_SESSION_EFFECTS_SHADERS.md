@@ -1,3 +1,10 @@
+> Cierre 01/11/2026: se publica en main el avance de samplers (`0036`) y
+> flujo CPU de vértices (`0037`). El experimento de profundidad por superficie
+> se retiró por sombras blancas/parpadeos y pantalla blanca durante captura.
+> Ver el cierre en [EFFECTS_AQUOS_2026-11-01.md](EFFECTS_AQUOS_2026-11-01.md).
+> Sombras/reflejos y FPS de gameplay siguen pendientes; no reactivar el
+> experimento sin una prueba GPU y comparación visual.
+
 # Próxima sesión — efectos y shaders (cierre 31/10/2026)
 
 **Actualización 01/11/2026:** se reprodujo y corrigió un desajuste de samplers

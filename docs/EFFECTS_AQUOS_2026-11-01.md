@@ -111,3 +111,32 @@ Referencias de implementación:
 [heaps de descriptores D3D12](https://learn.microsoft.com/en-us/windows/win32/direct3d12/creating-descriptor-heaps),
 [modos de textura GCM en RPCS3](https://github.com/RPCS3/rpcs3/blob/master/rpcs3/Emu/RSX/gcm_enums.h)
 y decodificadores existentes `rsx_live_draw.c`/`rsx_vulkan_backend.c` del toolkit.
+
+## Cierre: sombras experimentales retiradas
+
+La prueba posterior de profundidad por superficie produjo sombras blancas y
+parpadeos en Aquos. La siguiente corrida terminó con pantalla blanca; el log
+registra `0x887A0005` (dispositivo eliminado) inmediatamente después de iniciar
+la captura. El readback experimental de profundidad construía el footprint
+manualmente, mientras que la prueba D3D12 devuelve un footprint distinto con
+`GetCopyableFootprints`. Es una causa sospechada del fallo de captura, todavía
+sin confirmación; no explica por sí sola las sombras blancas anteriores.
+
+Se retiró íntegramente ese experimento del backend final, restaurando el estado
+validado de `0036` + `0037`. No se publica como solución de sombras. Las fuentes
+experimentales y pruebas quedan fuera de Git en
+`diagnostics/arena/shadow-experiment-withdrawn-20261101/`; las corridas están en
+`aquos-native-depth-20261101` y `aquos-depth-clear-20261101`.
+
+Para retomar: validar primero readback mediante footprints reales y patrones
+de profundidad no uniformes; después comprobar comparación, orden de clears
+y transiciones de cada superficie contra RPCS3. Los reflejos distorsionados,
+las sombras correctas y los FPS sostenidos siguen pendientes. Esta entrega
+conserva el agua/cascadas/lluvia y la mejora de entrada confirmadas por el
+usuario, evitando publicar la regresión blanca.
+
+Validación final del estado restaurado: build Release correcta, 20/20 pruebas
+de render/FIFO/pipeline, 36 parches aplicados a HEAD limpio y arranque hasta
+menú con ventana respondiendo (~29,5 FPS). No se repitió una navegación
+completa a Aquos tras retirar el experimento; corresponde al mismo backend
+que el usuario había validado antes de las pruebas de profundidad.
